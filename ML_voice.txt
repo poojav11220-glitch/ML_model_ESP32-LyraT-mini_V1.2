@@ -1,0 +1,107 @@
+Wake word detection 
+
+How ML_voice Works
+
+The project detects the wake word "Hi LeXin" on an ESP32 LyraT-Mini v1.2 board and prints Detected to the terminal. Here's the full pipeline:
+
+---
+Hardware Chain
+
+Microphone → ES7243E ADC → I2S bus → ESP32 DMA → WakeNet5 model → Terminal
+
+┌───────────┬──────────────────────────────────────────────────────────────────────────┐
+│ Component │                                   Role                                   
+├───────────┼──────────────────────────────────────────────────────────────────────────┤
+│ ES7243E   │ Stereo audio ADC chip, converts microphone analog signal → digital I2S   
+├───────────┼──────────────────────────────────────────────────────────────────────────┤
+│ I2S bus   │ Serial digital audio bus (GPIO0=MCLK, GPIO32=BCK, GPIO33=WS, GPIO36=DIN) 
+├───────────┼──────────────────────────────────────────────────────────────────────────┤
+│ I2C bus   │ Control bus for programming ES7243E registers (GPIO18=SDA, GPIO23=SCL)   
+├───────────┼──────────────────────────────────────────────────────────────────────────┤
+│ ESP32 DMA │ Hardware buffer that fills automatically from I2S — CPU doesn't poll     
+├───────────┼──────────────────────────────────────────────────────────────────────────┤
+│ WakeNet5  │ Neural network model that runs on ESP32, listens for "Hi LeXin"          
+└───────────┴──────────────────────────────────────────────────────────────────────────┘
+
+---
+Startup Sequence (order matters)
+
+1. led_init()        — GPIO22 (green), GPIO27 (blue)
+2. i2s_mic_init()    — Starts I2S clock (MCLK) on GPIO0
+   ↓ 100ms wait
+3. es7243_init()     — Programs ES7243E registers over I2C
+                       ES7243E needs MCLK already running before it accepts I2C commands
+   ↓ 50ms wait
+4. esp_srmodel_init()— Loads WakeNet5 model from flash partition "model"
+5. Detection loop    — Runs forever
+
+Why I2S first? The ES7243E's PLL uses MCLK as its reference clock. Without MCLK, the chip won't respond to I2C register writes.
+
+---
+ES7243E Init (40+ register writes)
+
+The ES7243E is a complex chip. The register sequence:
+- Reset + power-up — puts chip in known state
+- Clock dividers — 0x06=0x03 sets SCLK=MCLK/4; 0x07/0x08 sets LRCK=MCLK/256 → 16 kHz sample rate
+- I2S format — 0x03=0x20 → Philips standard, 24-bit audio in 32-bit slot
+- PGA gain — 0x20/0x21=0x0C → ~18 dB microphone amplification
+- ADC enable — calibration pulse on 0x16, then enable output
+
+---
+Audio Capture Loop
+
+Every 30ms (480 samples at 16kHz):
+
+1. i2s_channel_read() ×2     — accumulate 3840 bytes (480 stereo frames)
+   └─ DMA ring delivers 1920 bytes at a time → loop until full
+
+2. Extract RIGHT channel       — raw[i*2+1] >> 8
+   └─ ES7243E: audio_24bit is in bits[31:8] of 32-bit word
+   └─ Arithmetic right-shift by 8 → signed 16-bit audio sample
+
+3. Store in buf[480]           — int16_t array for WakeNet5
+
+4. wakenet->detect(model, buf) — run neural network on this 30ms chunk
+   └─ Returns WAKENET_DETECTED if "Hi LeXin" heard
+
+5. printf("Detected\n")        — only printed on positive detection
+
+---
+WakeNet5 Model
+
+Model file: wn5_hilexin  (in flash at 0x190000, 2MB partition)
+Input:  480 samples × int16_t × 16kHz mono
+Output: WAKENET_DETECTED or WAKENET_NO_DETECT
+
+How it works internally:
+  Raw audio → MFCC features → quantized neural network → sliding window
+  Needs ~300ms of matching phonemes to trigger (several consecutive detect() calls)
+
+Wake word pronunciation: "嗨乐鑫" — say HEE-LUH-SHIN (Chinese-accented), not "High Lex-In"
+
+---
+I2S Data Format
+
+ES7243E output (Philips I2S, 32-bit slot, 24-bit audio):
+
+  Bit: 31 30 29 ... 8  7  6 ... 0
+       [  24-bit audio data   ] [zeros]
+
+DMA buffer layout (STEREO):
+  [L0(32b)][R0(32b)][L1(32b)][R1(32b)]...
+
+Extraction:
+  sR = (int32_t)raw[i*2+1] >> 8   ← arithmetic shift preserves sign
+
+---
+Debug Output Explained
+
+bytes=3840/3840  L_spread=450  R_spread=1200
+       ↑                ↑             ↑
+  Full DMA fill    Left channel   Right channel
+  (good)           amplitude      amplitude
+                   (peak-to-peak of 480 samples)
+
+- Silence: spread ~200–500 (just noise floor)
+- Voice nearby: spread jumps to 2000–8000
+- "Detected": WakeNet5 recognized the full "Hi LeXin" phrase

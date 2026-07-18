@@ -1,0 +1,14 @@
+# Wake word — WakeNet5 "Hi LeXin" (only option for original ESP32)
+# "Hi ESP" English only exists in WakeNet9 which requires ESP32-S3
+CONFIG_SR_WN_WN5_HILEXIN=y
+
+# Custom partition table with model partition
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# Flash size matches LyraT-Mini 8MB
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+CONFIG_I2S_SUPPRESS_DEPRECATE_WARN=y
+CONFIG_I2C_SUPPRESS_DEPRECATE_WARN=y
